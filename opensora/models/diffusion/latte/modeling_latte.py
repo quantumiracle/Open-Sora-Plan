@@ -288,6 +288,7 @@ class LatteT2V(ModelMixin, ConfigMixin):
             use_image_num: int = 0,
             enable_temporal_attentions: bool = True,
             return_dict: bool = True,
+            return_middle_feature: bool = False,
     ):
         """
         The [`Transformer2DModel`] forward method.
@@ -543,6 +544,8 @@ class LatteT2V(ModelMixin, ConfigMixin):
 
                         hidden_states = rearrange(hidden_states, '(b t) f d -> (b f) t d',
                                                   b=input_batch_size).contiguous()
+            if i == len(self.transformer_blocks) // 2:  # feature
+                tracked_hidden_states = hidden_states
 
         if self.is_input_patches:
             if self.config.norm_type != "ada_norm_single":
@@ -571,6 +574,11 @@ class LatteT2V(ModelMixin, ConfigMixin):
                 shape=(-1, self.out_channels, height * self.patch_size, width * self.patch_size)
             )
             output = rearrange(output, '(b f) c h w -> b c f h w', b=input_batch_size).contiguous()
+        
+        if return_middle_feature:
+            tracked_hidden_states = rearrange(tracked_hidden_states, '(b f) t d -> b f t d',
+                                                  b=input_batch_size)
+            return tracked_hidden_states
 
         if not return_dict:
             return (output,)
