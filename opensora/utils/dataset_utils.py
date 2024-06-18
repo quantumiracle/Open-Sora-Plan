@@ -13,9 +13,21 @@ def is_image_file(filename):
 class DecordInit(object):
     """Using Decord(https://github.com/dmlc/decord) to initialize the video_reader."""
 
-    def __init__(self, num_threads=1):
+    def __init__(self, num_threads=1, device_id=0, device_type='gpu'):
         self.num_threads = num_threads
-        self.ctx = decord.cpu(0)
+        self.device_id = device_id
+        self.device_type = device_type
+        if self.device_type == 'gpu':
+            self.ctx = decord.gpu(self.device_id)
+        else:
+            self.ctx = decord.cpu(self.device_id)        
+        # self.ctx = decord.cpu(0)
+
+    # def __new__(self, num_threads, device_id, device_type):
+    #     return object.__new__(self, (num_threads, device_id, device_type))
+
+    # def __getnewargs__(self):
+    #         return self.num_threads, self.device_id, self.device_type
 
     def __call__(self, filename):
         """Perform the Decord initialization.

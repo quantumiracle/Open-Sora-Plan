@@ -22,7 +22,7 @@ def random_video_noise(t, c, h, w):
     return vid
 
 class T2V_dataset(Dataset):
-    def __init__(self, args, transform, temporal_sample, tokenizer):
+    def __init__(self, args, transform, temporal_sample, tokenizer, rank=0, video_decoder='decord'):
         self.image_data = args.image_data
         self.video_data = args.video_data
         self.num_frames = args.num_frames
@@ -32,7 +32,9 @@ class T2V_dataset(Dataset):
         self.temporal_sample = temporal_sample
         self.tokenizer = tokenizer
         self.model_max_length = args.model_max_length
-        self.v_decoder = DecordInit()
+        self.video_decoder = video_decoder
+        if video_decoder == 'decord':
+            self.v_decoder = DecordInit(num_threads=1, device_id=rank, device_type='gpu')
 
         if self.num_frames != 1:
             self.vid_cap_list = self.get_vid_cap_list()
@@ -40,8 +42,7 @@ class T2V_dataset(Dataset):
                 self.img_cap_list = self.get_img_cap_list()
         else:
             self.img_cap_list = self.get_img_cap_list()
-        
-
+    
 
     def __len__(self):
         if self.num_frames != 1:
@@ -74,7 +75,10 @@ class T2V_dataset(Dataset):
         
         video_path = self.vid_cap_list[idx]['path']
         frame_idx = self.vid_cap_list[idx]['frame_idx']
-        video = self.decord_read(video_path, frame_idx)
+        if self.video_decoder == 'decord':
+            video = self.decord_read(video_path, frame_idx)  # does not work with mp.spawn
+        else:
+            video = self.tv_read(video_path, frame_idx)
         video = self.transform(video)  # T C H W -> T C H W
         # video = torch.rand(65, 3, 512, 512)
 
@@ -93,7 +97,8 @@ class T2V_dataset(Dataset):
         )
         input_ids = text_tokens_and_mask['input_ids']
         cond_mask = text_tokens_and_mask['attention_mask']
-        return dict(video=video, input_ids=input_ids, cond_mask=cond_mask)
+        # return dict(video=video, input_ids=input_ids, cond_mask=cond_mask)
+        return dict(video=video, input_ids=input_ids, cond_mask=cond_mask, text=text)
 
     def get_image_from_video(self, video_data):
         select_image_idx = np.linspace(0, self.num_frames-1, self.use_image_num, dtype=int)
