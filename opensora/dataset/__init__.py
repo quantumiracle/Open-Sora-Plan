@@ -6,6 +6,7 @@ from torchvision import transforms
 from torchvision.transforms import Lambda
 
 from .t2v_datasets import T2V_dataset
+from .s3_t2v_datasets import S3_T2V_dataset
 from .transform import ToTensorVideo, TemporalRandomCrop, RandomHorizontalFlipVideo, CenterCropResizeVideo, LongSideResizeVideo, SpatialStrideCropVideo
 
 def normalize_2x_minus_1(x):
@@ -105,5 +106,5 @@ def getdataset(args, rank=0, video_decoder='decord'):
             norm_fun
         ])
         tokenizer = AutoTokenizer.from_pretrained(args.text_encoder_name, cache_dir=args.cache_dir)
-        return T2V_dataset(args, transform=transform, temporal_sample=temporal_sample, tokenizer=tokenizer, rank=rank, video_decoder=video_decoder)
+        return S3_T2V_dataset(args, transform=transform, temporal_sample=temporal_sample, tokenizer=tokenizer, rank=rank, video_decoder=video_decoder)
     raise NotImplementedError(args.dataset)

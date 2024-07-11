@@ -5,23 +5,88 @@ import torchvision
 from einops import rearrange
 from decord import VideoReader
 from os.path import join as opj
-
+import imageio
 import torch
 import torchvision.transforms as transforms
 from torch.utils.data.dataset import Dataset
 from tqdm import tqdm
 from PIL import Image
-
+from collections import deque
 from opensora.utils.dataset_utils import DecordInit
 from opensora.utils.utils import text_preprocessing
 
+from s3torchconnector import S3MapDataset, S3IterableDataset
 
 def random_video_noise(t, c, h, w):
     vid = torch.rand(t, c, h, w) * 255.0
     vid = vid.to(torch.uint8)
     return vid
 
-class T2V_dataset(Dataset):
+
+class S3MP4Dataset(Dataset):
+    def __init__(self, urls, region):
+        self.dataset = []
+        self.lookup_dict = {}
+        for url in urls:
+            raw_dataset = S3MapDataset.from_prefix(url, region=region)
+            dataset = self.filter_mp4_files(raw_dataset)
+            self.dataset.extend(dataset)
+            num_non_mp4_files = len(raw_dataset) - len(dataset)
+            print(f"Number of non-mp4 files filtered for {url}: {num_non_mp4_files}")
+            print(f"Number of mp4 files for {url}: {len(dataset)}")
+        print(f"Number of total mp4 files: {len(self.dataset)}")
+
+        for idx, object in enumerate(self.dataset):
+            parts = object.key.split('/')
+            class_name = parts[-2]
+            only_filename = parts[-1]
+            self.lookup_dict[(class_name, only_filename)] = idx
+
+    def _format_key_value(self, object):
+        arr = load_video_into_array(object)
+        # get class between last two slashes using split
+        parts = object.key.split('/')
+        class_name = parts[-2]
+        only_filename = parts[-1]
+        return (only_filename, arr)
+
+
+    def filter_mp4_files(self, raw_dataset):
+        """Yield only items that are .mp4 files."""
+        processed = []
+        for item in raw_dataset:
+            if item.key.endswith('.mp4'):
+                processed.append(item)
+        return processed
+                
+
+    def __len__(self):
+        return len(self.dataset)
+    
+    def __getitem__(self, idx):
+        item = self.dataset[idx]
+        output = self._format_key_value(item)
+        return output
+    
+    def __next__(self):
+        """Return the next item from the dataset."""
+        item = next(self.dataset)
+        output = self._format_key_value(item)
+        return output
+    
+def load_video_into_array(file_like):
+    file_like.seek(0)
+    video_data = file_like.read()
+
+    # Use imageio to read frames from byte data
+    reader = imageio.get_reader(io.BytesIO(video_data), format='mp4')
+    frames = [frame for frame in reader]
+    reader.close()
+    frames = np.stack(frames)
+
+    return frames
+
+class S3_T2V_dataset(Dataset):
     def __init__(self, args, transform, temporal_sample, tokenizer, rank=0, video_decoder='decord'):
         self.image_data = args.image_data
         self.video_data = args.video_data
@@ -33,6 +98,14 @@ class T2V_dataset(Dataset):
         self.tokenizer = tokenizer
         self.model_max_length = args.model_max_length
         self.video_decoder = video_decoder
+        self.valid_samples = deque(maxlen=10)  # a fallback data queue
+        URIs = [
+            "s3://prj-zihan/opensora-dataset/v1.1/mixkit",
+            "s3://prj-zihan/opensora-dataset/v1.1/pexels",
+            "s3://prj-zihan/opensora-dataset/v1.1/pixabay_v2",
+        ]
+        REGION = "us-west-2" # check aws s3 bucket region
+        self.s3dataset = S3MP4Dataset(URIs, REGION)
         if video_decoder == 'decord':
             self.v_decoder = DecordInit(num_threads=1, device_id=rank, device_type='gpu')
 
@@ -43,28 +116,57 @@ class T2V_dataset(Dataset):
         else:
             self.img_cap_list = self.get_img_cap_list()    
 
+    def get_fallback_data(self):
+        # Return a random sample from the queue if available
+        assert len(self.valid_samples) > 0, "Fallback data requested but no valid samples are available."
+        return random.choice(self.valid_samples)
+
     def __len__(self):
         if self.num_frames != 1:
             return len(self.vid_cap_list)
         else:
             return len(self.img_cap_list)
         
+    # def __getitem__(self, idx):
+    #     try:
+    #         video_data, image_data = {}, {}
+    #         if self.num_frames != 1:
+    #             video_data = self.get_video(idx)
+    #             if self.use_image_num != 0:
+    #                 if self.use_img_from_vid:
+    #                     image_data = self.get_image_from_video(video_data)
+    #                 else:
+    #                     image_data = self.get_image(idx)
+    #         else:
+    #             image_data = self.get_image(idx)  # 1 frame video as image
+    #         return dict(video_data=video_data, image_data=image_data)
+    #     except Exception as e:
+    #         print(f'Error with {e}')
+    #         return self.__getitem__(random.randint(0, self.__len__() - 1))
     def __getitem__(self, idx):
-        try:
-            video_data, image_data = {}, {}
-            if self.num_frames != 1:
-                video_data = self.get_video(idx)
-                if self.use_image_num != 0:
-                    if self.use_img_from_vid:
-                        image_data = self.get_image_from_video(video_data)
-                    else:
-                        image_data = self.get_image(idx)
-            else:
-                image_data = self.get_image(idx)  # 1 frame video as image
-            return dict(video_data=video_data, image_data=image_data)
-        except Exception as e:
-            print(f'Error with {e}')
-            return self.__getitem__(random.randint(0, self.__len__() - 1))
+        max_attempts = 3
+        for _ in range(max_attempts):
+            try:
+                video_data, image_data = {}, {}
+                if self.num_frames != 1:
+                    video_data = self.get_video(idx)
+                    if video_data is None:
+                        idx = random.randint(0, self.__len__() - 1)
+                        continue
+                    if self.use_image_num != 0:
+                        if self.use_img_from_vid:
+                            image_data = self.get_image_from_video(video_data)
+                        else:
+                            image_data = self.get_image(idx)
+                else:
+                    image_data = self.get_image(idx)  # 1 frame video as image
+                valid_data = dict(video_data=video_data, image_data=image_data)
+                self.valid_samples.append(valid_data)
+                return valid_data
+            except Exception as e:
+                print(f'Error with {e}')
+                idx = random.randint(0, self.__len__() - 1)
+        return self.get_fallback_data()
 
     def get_video(self, idx):
         # video = random.choice([random_video_noise(65, 3, 720, 360) * 255, random_video_noise(65, 3, 1024, 1024), random_video_noise(65, 3, 360, 720)])
@@ -73,14 +175,34 @@ class T2V_dataset(Dataset):
         # cond_mask = torch.cat([torch.ones(1, 60).to(torch.long), torch.ones(1, 60).to(torch.long)], dim=1).squeeze(0)
         
         video_path = self.vid_cap_list[idx]['path']
+        parts = video_path.split('/')
+        class_name = parts[-2]
+        only_filename = parts[-1]
+        video_idx = self.s3dataset.lookup_dict.get((class_name, only_filename), None)
+        if video_idx is None:
+            print(f"KeyError: ({class_name}, {only_filename}) not found in the dataset.")
+            return None
+        _, video = self.s3dataset[video_idx]
+        video = torch.tensor(video.transpose(0, 3, 1, 2)) # T H W C -> T C H W
         frame_idx = self.vid_cap_list[idx]['frame_idx']
-        print(self.vid_cap_list[idx])
-        if self.video_decoder == 'decord':
-            video = self.decord_read(video_path, frame_idx)  # does not work with mp.spawn
+        total_frames = video.shape[0]
+        # Sampling video frames
+        if frame_idx is None:
+            start_frame_ind, end_frame_ind = self.temporal_sample(total_frames)
         else:
-            video = self.tv_read(video_path, frame_idx)
+            start_frame_ind, end_frame_ind = frame_idx.split(':')
+            # start_frame_ind, end_frame_ind = int(start_frame_ind), int(end_frame_ind)
+            start_frame_ind, end_frame_ind = int(start_frame_ind), int(start_frame_ind) + self.num_frames
+        # assert end_frame_ind - start_frame_ind >= self.num_frames
+        frame_indice = np.linspace(start_frame_ind, end_frame_ind - 1, self.num_frames, dtype=int)
+        video = video[frame_indice]  # (T, C, H, W)
+
+        # if self.video_decoder == 'decord':
+        #     video = self.decord_read(video_path, frame_idx)  # does not work with mp.spawn
+        # else:
+        #     video = self.tv_read(video_path, frame_idx)
+
         video = self.transform(video)  # T C H W -> T C H W
-        # video = torch.rand(65, 3, 512, 512)
 
         video = video.transpose(0, 1)  # T C H W -> C T H W
         text = self.vid_cap_list[idx]['cap']

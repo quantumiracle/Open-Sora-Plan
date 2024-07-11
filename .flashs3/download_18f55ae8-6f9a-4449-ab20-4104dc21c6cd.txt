@@ -1,0 +1,1 @@
+s3://prj-zihan/opensora-dataset/v1.1/test/pixabay_v2/ -> /mnt/localssd/LanguageBind/Open-Sora-Plan-v1.1.0_dataset/test/pixabay_v2/

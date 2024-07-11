@@ -1,0 +1,3 @@
+s3://prj-zihan/opensora-dataset/v1.1/test/anno_jsons/ -> /mnt/localssd/LanguageBind/Open-Sora-Plan-v1.1.0_dataset/v1.1/test/anno_jsons/
+s3://prj-zihan/opensora-dataset/v1.1/test/pixabay_v2/ -> /mnt/localssd/LanguageBind/Open-Sora-Plan-v1.1.0_dataset/v1.1/test/pixabay_v2/
+s3://prj-zihan/opensora-dataset/v1.1/test/ -> /mnt/localssd/LanguageBind/Open-Sora-Plan-v1.1.0_dataset/v1.1/test/
