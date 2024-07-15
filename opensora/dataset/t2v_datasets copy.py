@@ -14,40 +14,12 @@ from PIL import Image
 
 from opensora.utils.dataset_utils import DecordInit
 from opensora.utils.utils import text_preprocessing
-from s3torchconnector import S3MapDataset, S3IterableDataset
-from concurrent.futures import ThreadPoolExecutor
+
 
 def random_video_noise(t, c, h, w):
     vid = torch.rand(t, c, h, w) * 255.0
     vid = vid.to(torch.uint8)
     return vid
-
-class S3MP4Dataset():
-    def __init__(self, urls, region):
-        self.dataset = []
-        self.lookup_dict = {}
-        for url in urls:
-            raw_dataset = S3MapDataset.from_prefix(url, region=region)
-            dataset = self.filter_mp4_files(raw_dataset)
-            self.dataset.extend(dataset)
-            num_non_mp4_files = len(raw_dataset) - len(dataset)
-            print(f"Number of non-mp4 files filtered for {url}: {num_non_mp4_files}")
-            print(f"Number of mp4 files for {url}: {len(dataset)}")
-        print(f"Number of total mp4 files: {len(self.dataset)}")
-
-        for idx, obj in enumerate(self.dataset):
-            parts = obj.key.split('/')
-            class_name = parts[-2]
-            only_filename = parts[-1]
-            self.lookup_dict[(class_name, only_filename)] = idx
-
-    def filter_mp4_files(self, raw_dataset):
-        """Yield only items that are .mp4 files."""
-        processed = []
-        for item in raw_dataset:
-            if item.key.endswith('.mp4'):
-                processed.append(item)
-        return processed
 
 class T2V_dataset(Dataset):
     def __init__(self, args, transform, temporal_sample, tokenizer, rank=0, video_decoder='decord'):
@@ -69,44 +41,7 @@ class T2V_dataset(Dataset):
             if self.use_image_num != 0 and not self.use_img_from_vid:
                 self.img_cap_list = self.get_img_cap_list()
         else:
-            self.img_cap_list = self.get_img_cap_list() 
-
-        # use selective part of all datasets
-        URIs = [
-            # "s3://prj-zihan/opensora-dataset/v1.1/mixkit",
-            "s3://prj-zihan/opensora-dataset/v1.1/pexels",
-            # "s3://prj-zihan/opensora-dataset/v1.1/pixabay_v2",
-        ]
-        REGION = "us-west-2" # check aws s3 bucket region
-        self.s3dataset = S3MP4Dataset(URIs, REGION)   
-        self._filter_nonexist_files()
-        print(f"Number of videos: {len(self.vid_cap_list)}")
-
-    def _filter_nonexist_files(self,):
-        """ A multithread fast version"""
-        print("Filtering non-existing videos...")
-        dataset = self.s3dataset.dataset
-        # Extract key values from dataset
-        key_values = set()
-        for item in dataset:
-            parts = item.key.split('/')
-            key_value = '/'.join(parts[-2:])  # Join the second to last and last part
-            key_values.add(key_value)
-
-        def filter_entry(entry):
-            """ Filter individual entries, checking against the global key_values. """
-            return '/'.join(entry['path'].split('/')[-2:]) in key_values
-
-        # Use ThreadPoolExecutor to filter vid_cap_list in parallel
-        with ThreadPoolExecutor() as executor:
-            results = list(executor.map(filter_entry, self.vid_cap_list))
-
-        # Combine entries with their filter results
-        filtered_vid_cap_list = [entry for entry, include in zip(self.vid_cap_list, results) if include]
-        print("Number of videos before filtering:", len(self.vid_cap_list))
-        print("Number of videos after filtering:", len(filtered_vid_cap_list))
-        print("Number of non-existing videos filtered:", len(self.vid_cap_list) - len(filtered_vid_cap_list))
-        self.vid_cap_list = filtered_vid_cap_list
+            self.img_cap_list = self.get_img_cap_list()    
 
     def __len__(self):
         if self.num_frames != 1:

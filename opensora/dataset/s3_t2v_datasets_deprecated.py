@@ -15,15 +15,9 @@ from collections import deque
 from opensora.utils.dataset_utils import DecordInit
 from opensora.utils.utils import text_preprocessing
 from concurrent.futures import ThreadPoolExecutor
-import concurrent.futures
-import multiprocessing
-import cv2
-import copy
-
 from s3torchconnector import S3MapDataset, S3IterableDataset
 import gc
-# from memory_profiler import profile
-import tempfile
+from memory_profiler import profile
 
 def random_video_noise(t, c, h, w):
     vid = torch.rand(t, c, h, w) * 255.0
@@ -32,7 +26,7 @@ def random_video_noise(t, c, h, w):
 
 
 
-class S3MP4Dataset():
+class S3MP4Dataset(Dataset):
     def __init__(self, urls, region):
         self.dataset = []
         self.lookup_dict = {}
@@ -51,6 +45,15 @@ class S3MP4Dataset():
             only_filename = parts[-1]
             self.lookup_dict[(class_name, only_filename)] = idx
 
+    def _format_key_value(self, obj):
+        arr = load_video_into_array(obj)
+        # get class between last two slashes using split
+        parts = obj.key.split('/')
+        class_name = parts[-2]
+        only_filename = parts[-1]
+        return (only_filename, arr)
+
+
     def filter_mp4_files(self, raw_dataset):
         """Yield only items that are .mp4 files."""
         processed = []
@@ -59,48 +62,96 @@ class S3MP4Dataset():
                 processed.append(item)
         return processed
                 
-def tv_read(path, frame_idx, num_frames):
-    vframes, aframes, info = torchvision.io.read_video(filename=path, pts_unit='sec', output_format='TCHW')
-    start_frame_ind, end_frame_ind = frame_idx.split(':')
-    start_frame_ind, end_frame_ind = int(start_frame_ind), int(end_frame_ind)
-    # assert end_frame_ind - start_frame_ind >= self.num_frames
-    frame_indice = np.linspace(start_frame_ind, end_frame_ind - 1, num_frames, dtype=int)
-    # frame_indice = np.linspace(0, 63, self.num_frames, dtype=int)
 
-    video = vframes[frame_indice]  # (T, C, H, W)
-
-    return video
-
-def cv_read(video_path, frame_idx, num_frames):
-    # frame index processsing, same as others
-    start_frame_ind, end_frame_ind = frame_idx.split(':')
-    start_frame_ind, end_frame_ind = int(start_frame_ind), int(end_frame_ind)
-    # assert end_frame_ind - start_frame_ind >= self.num_frames
-    frame_numbers = np.linspace(start_frame_ind, end_frame_ind - 1, num_frames, dtype=int)
+    def __len__(self):
+        return len(self.dataset)
     
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        print(f"Error opening video file: {video_path}")
-        return
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    def __getitem__(self, idx):
+        item = self.dataset[idx]
+        output = self._format_key_value(item)
+        return output
+    
+    def __next__(self):
+        """Return the next item from the dataset."""
+        item = next(self.dataset)
+        output = self._format_key_value(item)
+        return output
+    
+# def load_video_into_array(file_like):
+#     file_like.seek(0)
+#     video_data = file_like.read()
 
-    valid_frame_numbers = [fn for fn in frame_numbers if 0 <= fn < total_frames]
-    if len(valid_frame_numbers) != len(frame_numbers):
-        print(f"Some frame numbers are out of range in {video_path}")
-    frame_list = []
-    for frame_number in valid_frame_numbers:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
-        ret, frame = cap.read()
-        if not ret:
-            print(f"Error reading frame number {frame_number} from {video_path}")
-            continue
-        frame_list.append(frame)
-    cap.release()
-    # cv2.destroyAllWindows()
-    # print(f"Released video file: {video_path}")
-    raw_video = np.array(frame_list)
-    raw_video = raw_video.transpose(0, 3, 1, 2) # T H W C -> T C H W
-    return torch.from_numpy(raw_video)
+#     # Use imageio to read frames from byte data
+#     reader = imageio.get_reader(io.BytesIO(video_data), format='mp4')
+#     frames = [frame for frame in reader]
+#     reader.close()
+#     frames = np.stack(frames)
+
+#     return frames
+
+from decord import VideoReader
+from decord import cpu, gpu
+import tempfile
+import mmap
+import copy
+
+# def load_video_into_array(file_like):
+#     # Create a bytes buffer for reading data
+#     # buffer = bytearray(1024*1024*50000)  # Create a buffer of 1 MB
+#     # memoryview_buffer = memoryview(buffer)
+
+#     file_like.seek(0)
+#     video_data = file_like.read()
+#     # bytes_read = file_like.readinto(memoryview_buffer)  # not help
+#     # video_data = memoryview_buffer[:bytes_read]
+#     # file_like.close() # not help
+
+#     # Write data to a temporary file
+#     with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmpfile:
+#         tmpfile.write(video_data)
+#         tmpfile.flush()  # Ensure data is written to disk
+        
+#         # Load video with Decord
+#         vr = VideoReader(tmpfile.name)
+#         frames = [vr[i].asnumpy() for i in range(len(vr))]
+    
+#     # Delete the temporary file
+#     os.unlink(tmpfile.name)
+#     frames = np.stack(frames)
+#     return frames
+
+def load_video_into_array(file_like):
+    """ mmap and chunk of tempfile does not help with memory leakage """
+    # Step 1: Download the S3 object to a temporary file
+    with tempfile.NamedTemporaryFile(delete=False) as tmpfile:
+        file_like.seek(0)  # Assuming the S3Reader supports seek
+        # Copy content from S3Reader to temporary file
+        while True:
+            chunk = file_like.read(1024 * 1024)  # Read in 1 MB chunks
+            if not chunk:
+                break
+            tmpfile.write(chunk)
+        tmpfile_path = tmpfile.name  # Save the path for later use
+    
+    # Step 2: Use imageio to read video frames from the temporary file
+    with open(tmpfile_path, 'rb') as f:
+        # Memory-map the file for reading video data
+        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        # Use imageio to read frames from memory-mapped data
+        with imageio.get_reader(io.BytesIO(mm), format='mp4') as reader:
+            frames = [np.array(frame) for frame in reader]
+            # Example: Process these frames or return them
+            print(f"Read {len(frames)} frames from the video.")
+
+    # Step 3: Cleanup the temporary file
+    os.unlink(tmpfile_path)  # Ensure the file is deleted
+    if 'mm' in locals():
+        mm.close()  # Ensure the mmap is closed
+
+    # Stack frames into a numpy array
+    frames = np.stack(frames)
+
+    return frames
 
 class S3_T2V_dataset(Dataset):
     def __init__(self, args, transform, temporal_sample, tokenizer, rank=0, video_decoder='decord'):
@@ -210,7 +261,7 @@ class S3_T2V_dataset(Dataset):
             print(f'Error with {e}')
             return self.__getitem__(random.randint(0, self.__len__() - 1))
 
-
+    # @profile
     # def __getitem__(self, idx):
     #     max_attempts = 3
     #     for _ in range(max_attempts):
@@ -236,6 +287,7 @@ class S3_T2V_dataset(Dataset):
     #             idx = random.randint(0, self.__len__() - 1)
     #     return self.get_fallback_data()
 
+    # @profile
     # def __getitem__(self, idx):
     #     # try:
     #     video_data, image_data = {}, {}
@@ -258,19 +310,7 @@ class S3_T2V_dataset(Dataset):
     #     #     print(f'Error with {e}')
     #     # return self.get_fallback_data()
 
-    def get_path(self, obj):
-        """ mmap and chunk of tempfile does not help with memory leakage """
-        obj2 = copy.deepcopy(obj)  # this is essential to avoid memory leakage; copy.copy() is not enough
-        obj2.seek(0)
-        video_data = obj2.read()
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmpfile:
-            tmpfile.write(video_data)
-            tmpfile.flush()  # Ensure data is written to disk
-            tmpfile_path = tmpfile.name
-        del video_data
-        return tmpfile_path
-
-    # @profile
+    @profile
     def get_video(self, idx):
         # video = random.choice([random_video_noise(65, 3, 720, 360) * 255, random_video_noise(65, 3, 1024, 1024), random_video_noise(65, 3, 360, 720)])
         # # print('random shape', video.shape)
@@ -285,33 +325,30 @@ class S3_T2V_dataset(Dataset):
         if video_idx is None:
             print(f"KeyError: ({class_name}, {only_filename}) not found in the dataset.")
             return None
-        obj = self.s3dataset.dataset[video_idx]
+        _, raw_video = self.s3dataset[video_idx]
+        raw_video = raw_video.transpose(0, 3, 1, 2) # T H W C -> T C H W
+        print("shape: ", raw_video.shape)
         frame_idx = self.vid_cap_list[idx]['frame_idx']
-        obj_video_path = self.get_path(obj)
-
-        if self.video_decoder == 'decord':
-            video = self.decord_read(obj_video_path, frame_idx)  # does not work with mp.spawn
-        elif self.video_decoder == 'cv2':
-            video = cv_read(obj_video_path, frame_idx, self.num_frames)
+        total_frames = raw_video.shape[0]
+        # Sampling video frames
+        if frame_idx is None:
+            start_frame_ind, end_frame_ind = self.temporal_sample(total_frames)
         else:
-            # video = self.tv_read(video_path, frame_idx)
+            start_frame_ind, end_frame_ind = frame_idx.split(':')
+            # start_frame_ind, end_frame_ind = int(start_frame_ind), int(end_frame_ind)
+            start_frame_ind, end_frame_ind = int(start_frame_ind), int(start_frame_ind) + self.num_frames
+        # assert end_frame_ind - start_frame_ind >= self.num_frames
+        frame_indice = np.linspace(start_frame_ind, end_frame_ind - 1, self.num_frames, dtype=int)
+        video = copy.deepcopy(raw_video[frame_indice])  # (T, C, H, W)
+        video = torch.from_numpy(video)
+        del raw_video
+        # gc.collect()
+        print("after shape: ", video.shape, frame_indice)
 
-            # https://stackoverflow.com/questions/15455048/releasing-memory-in-python
-            # Use a ProcessPoolExecutor to run the tv_read function in a separate process
-            with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
-                # future = executor.submit(self.tv_read, obj_video_path, frame_idx)  # error: cannot spawn s3client...
-                future = executor.submit(tv_read, obj_video_path, frame_idx, self.num_frames)
-                video = future.result()  # Wait for the child process to complete and get the result
-
-            # with multiprocessing.Pool(1) as pool:
-            #     # Submit the read function to the pool
-            #     result = pool.apply_async(read, (obj_video_path, frame_idx, 65))
-            #     # Retrieve the result of the function call
-            #     video = result.get()  # This will block until the function completes
-
-        # Delete the temporary file
-        os.unlink(obj_video_path)
-        gc.collect()
+        # if self.video_decoder == 'decord':
+        #     video = self.decord_read(video_path, frame_idx)  # does not work with mp.spawn
+        # else:
+        #     video = self.tv_read(video_path, frame_idx)
 
         video = self.transform(video)  # T C H W -> T C H W
 

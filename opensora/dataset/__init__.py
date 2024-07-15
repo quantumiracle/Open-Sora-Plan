@@ -106,5 +106,6 @@ def getdataset(args, rank=0, video_decoder='decord'):
             norm_fun
         ])
         tokenizer = AutoTokenizer.from_pretrained(args.text_encoder_name, cache_dir=args.cache_dir)
+        # return T2V_dataset(args, transform=transform, temporal_sample=temporal_sample, tokenizer=tokenizer, rank=rank, video_decoder=video_decoder)
         return S3_T2V_dataset(args, transform=transform, temporal_sample=temporal_sample, tokenizer=tokenizer, rank=rank, video_decoder=video_decoder)
     raise NotImplementedError(args.dataset)
