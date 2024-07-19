@@ -94,7 +94,9 @@ def cv_read(video_path, frame_idx, num_frames):
         if not ret:
             print(f"Error reading frame number {frame_number} from {video_path}")
             continue
-        frame_list.append(frame)
+        # Convert BGR (cv2) to RGB (standard)
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frame_list.append(rgb_frame)
     cap.release()
     # cv2.destroyAllWindows()
     # print(f"Released video file: {video_path}")
